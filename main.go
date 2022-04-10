@@ -6,8 +6,7 @@ import (
 	"image/png"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/wasi"
+	"wasm/wasm"
 )
 
 //go:embed wasm/draw.wasm
@@ -27,17 +26,6 @@ var circleReadyToBeDrawn chan circleImage
 var drawNewCircleForPos chan int
 
 func drawWasmCircle() {
-	wazRuntime := wazero.NewRuntime()
-	wm, _ := wasi.InstantiateSnapshotPreview1(wazRuntime)
-	module, _ := wazRuntime.InstantiateModuleFromCodeWithConfig(drawWasm, wazero.NewModuleConfig())
-	defer wm.Close()
-	defer module.Close()
-
-	draw := module.ExportedFunction("draw")
-	getImageAddress := module.ExportedFunction("getImageAddress")
-	getImageSize := module.ExportedFunction("getImageSize")
-	memory := module.Memory()
-
 	for {
 		// uses blocking RECEIVE channel to wait until
 		// a new circle is requested by the `Update` method
@@ -45,17 +33,17 @@ func drawWasmCircle() {
 
 		// draw function creates a new GO image using https://github.com/fogleman/gg
 		// and stores it in a fixed size []byte slice called `imageBytes`
-		draw.Call(nil)
+		wasm.Draw()
 
 		// getImageSize returns the number of bytes that correspond to the generated image
-		imgSize, _ := getImageSize.Call(nil)
+		imgSize := wasm.GetImageSize()
 
 		// getImageAddress returns a pointer to `imageBytes` which we need to use
 		// as the offset within wasm linear-memory in the following instruction
-		imgAddr, _ := getImageAddress.Call(nil)
+		imgAddr := wasm.GetImageAddress()
 
 		// read from linear-memory the image as a slice of bytes encoded in png format
-		v, _ := memory.Read(uint32(imgAddr[0]), uint32(imgSize[0]))
+		v := imgAddr[0:imgSize]
 
 		// decode bytes and convert them back into a golang image.Image object
 		img, _ := png.Decode(bytes.NewReader(v))
