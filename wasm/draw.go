@@ -6,41 +6,48 @@ import (
 	"image/png"
 	"math/rand"
 	"time"
+	"unsafe"
 )
-
-const BUFFER_SIZE = 1000
-
-var imageBytes [BUFFER_SIZE]byte
-var imageSize int
-var buf *bytes.Buffer
 
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
-	buf = new(bytes.Buffer)
 }
 
-//export draw
-func draw() {
+func draw() ([]byte, error) {
 	dc := gg.NewContext(30, 30)
 	dc.DrawCircle(15, 15, 15)
 	dc.SetRGB(rand.Float64(), rand.Float64(), rand.Float64())
 	dc.Fill()
 	img := dc.Image()
 
+	buf := new(bytes.Buffer)
 	err := png.Encode(buf, img)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// _draw is a WebAssembly export that invokes draw and returns a pointer/size
+// pair of the image, packed into a uint64.
+//
+// Note: This uses a uint64 instead of two result values for compatibility
+// with WebAssembly 1.0.
+// See https://github.com/tetratelabs/wazero/tree/main/examples/allocation/tinygo
+//export draw
+func _draw() (ptrSize uint64) {
+	buf, err := draw()
 	if err != nil {
 		panic(err)
 	}
-	copy(imageBytes[:], buf.Bytes())
-	buf.Reset()
+	ptr, size := bufToPtr(buf)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
 }
 
-//export getImageAddress
-func getImageAddress() *[BUFFER_SIZE]uint8 {
-	return &imageBytes
-}
-
-//export getImageSize
-func getImageSize() int {
-	return len(imageBytes)
+// bufToPtr returns a pointer and size pair for the given byte slice in a way
+// compatible with WebAssembly numeric types.
+func bufToPtr(buf []byte) (uint32, uint32) {
+	ptr := &buf[0]
+	unsafePtr := uintptr(unsafe.Pointer(ptr))
+	return uint32(unsafePtr), uint32(len(buf))
 }

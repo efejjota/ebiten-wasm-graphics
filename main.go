@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
+	"github.com/tetratelabs/wazero/api"
+	"image"
 	"image/png"
+	"log"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/wasi"
 )
 
+// drawWasm was built with `tinygo build -o wasm/draw.wasm -scheduler=none -target=wasi wasm/draw.go`
 //go:embed wasm/draw.wasm
 var drawWasm []byte
 
@@ -27,38 +32,29 @@ var circleReadyToBeDrawn chan circleImage
 var drawNewCircleForPos chan int
 
 func drawWasmCircle() {
+	ctx := context.Background()
 	wazRuntime := wazero.NewRuntime()
-	wm, _ := wasi.InstantiateSnapshotPreview1(wazRuntime)
-	module, _ := wazRuntime.InstantiateModuleFromCodeWithConfig(drawWasm, wazero.NewModuleConfig())
-	defer wm.Close()
-	defer module.Close()
+	defer wazRuntime.Close(ctx) // This closes everything this Runtime created.
 
-	draw := module.ExportedFunction("draw")
-	getImageAddress := module.ExportedFunction("getImageAddress")
-	getImageSize := module.ExportedFunction("getImageSize")
-	memory := module.Memory()
+	// Note: wasm/draw.go doesn't use WASI, but TinyGo needs it to
+	// implement functions such as panic.
+	if _, err := wasi.InstantiateSnapshotPreview1(ctx, wazRuntime); err != nil {
+		log.Panicln(err)
+	}
+
+	// Instantiate a WebAssembly module that imports the exports "memory" and
+	// the "draw" function which uses Ebiten to render images.
+	module, err := wazRuntime.InstantiateModuleFromCode(ctx, drawWasm)
+	if err != nil {
+		log.Panicln(err)
+	}
 
 	for {
 		// uses blocking RECEIVE channel to wait until
 		// a new circle is requested by the `Update` method
 		pos := <-drawNewCircleForPos
 
-		// draw function creates a new GO image using https://github.com/fogleman/gg
-		// and stores it in a fixed size []byte slice called `imageBytes`
-		draw.Call(nil)
-
-		// getImageSize returns the number of bytes that correspond to the generated image
-		imgSize, _ := getImageSize.Call(nil)
-
-		// getImageAddress returns a pointer to `imageBytes` which we need to use
-		// as the offset within wasm linear-memory in the following instruction
-		imgAddr, _ := getImageAddress.Call(nil)
-
-		// read from linear-memory the image as a slice of bytes encoded in png format
-		v, _ := memory.Read(uint32(imgAddr[0]), uint32(imgSize[0]))
-
-		// decode bytes and convert them back into a golang image.Image object
-		img, _ := png.Decode(bytes.NewReader(v))
+		img := draw(ctx, module)
 
 		// transfer through channel the image ready to be used by ebiten
 		// with its x and y coordinates already calculated for drawing
@@ -66,7 +62,36 @@ func drawWasmCircle() {
 	}
 }
 
-// This method is required by Ebiten. It is called
+// draw creates a new GO image using https://github.com/fogleman/gg
+func draw(ctx context.Context, module api.Module) image.Image {
+	// and returns its size in bytes and memory offset packed into a uint64.
+	ptrSize, err := module.ExportedFunction("draw").Call(ctx)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// Note: This pointer is still owned by TinyGo, so don't try to free it!
+	imgPtr := uint32(ptrSize[0] >> 32)
+	imgSize := uint32(ptrSize[0])
+
+	// The image represented by region in linear-memory must be read before
+	// the next Wasm call. Otherwise, the underlying data could be garbage
+	// collected.
+	v, ok := module.Memory().Read(ctx, imgPtr, imgSize)
+	if !ok {
+		log.Panicf("Memory.Read(%d, %d) out of range of memory size %d\n",
+			imgPtr, imgSize, module.Memory().Size(ctx))
+	}
+
+	// decode bytes and convert them back into a golang image.Image object
+	img, err := png.Decode(bytes.NewReader(v))
+	if err != nil {
+		log.Panicln(err)
+	}
+	return img
+}
+
+// Update is required by Ebiten. It is called
 // automatically and includes the logic communicating
 // with the `drawWasmCircle` function wich runs Wazero
 func (g *Game) Update() error {
@@ -91,14 +116,14 @@ func (g *Game) Update() error {
 	return nil
 }
 
-// This method is required by Ebiten. It is called
+// Draw is required by Ebiten. It is called
 // automatically and is in charge of rendering to the screen
 func (g *Game) Draw(screen *ebiten.Image) {
 	op := ebiten.DrawImageOptions{}
 	screen.DrawImage(g.img, &op)
 }
 
-// This method is required by Ebiten. It controls rendering proportions.
+// Layout is required by Ebiten. It controls rendering proportions.
 // This code is mostly irrelevant for this example.
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return outsideWidth, outsideHeight
