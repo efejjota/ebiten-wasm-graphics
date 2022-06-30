@@ -4,17 +4,18 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"github.com/tetratelabs/wazero/api"
 	"image"
 	"image/png"
 	"log"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/wasi"
+	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 // drawWasm was built with `tinygo build -o wasm/draw.wasm -scheduler=none -target=wasi wasm/draw.go`
+//
 //go:embed wasm/draw.wasm
 var drawWasm []byte
 
@@ -33,18 +34,20 @@ var drawNewCircleForPos chan int
 
 func drawWasmCircle() {
 	ctx := context.Background()
-	wazRuntime := wazero.NewRuntime()
+	wazRuntime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		// WebAssembly 2.0 allows use of any version of TinyGo, including 0.24+.
+		WithWasmCore2())
 	defer wazRuntime.Close(ctx) // This closes everything this Runtime created.
 
 	// Note: wasm/draw.go doesn't use WASI, but TinyGo needs it to
 	// implement functions such as panic.
-	if _, err := wasi.InstantiateSnapshotPreview1(ctx, wazRuntime); err != nil {
+	if _, err := wasi_snapshot_preview1.Instantiate(ctx, wazRuntime); err != nil {
 		log.Panicln(err)
 	}
 
 	// Instantiate a WebAssembly module that imports the exports "memory" and
 	// the "draw" function which uses Ebiten to render images.
-	module, err := wazRuntime.InstantiateModuleFromCode(ctx, drawWasm)
+	module, err := wazRuntime.InstantiateModuleFromBinary(ctx, drawWasm)
 	if err != nil {
 		log.Panicln(err)
 	}
